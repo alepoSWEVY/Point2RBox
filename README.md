@@ -5,6 +5,7 @@
   <a href='https://arxiv.org/pdf/2509.26281'><img src='https://img.shields.io/badge/Paper-Arxiv-red'></a>
   <a href='#citation'><img src='https://img.shields.io/badge/Paper-BibTex-Green'></a>
   <a href='https://github.com/VisionXLab/Point2RBox-v3'><img src='https://img.shields.io/badge/💻_Code-Github-blue'></a>
+  <a href='https://github.com/VisionXLab/Point2RBox-v3-jittor'><img src='https://img.shields.io/badge/Jittor-Implementation-red?logo=github&logoColor=white'></a>
   <a href='https://johnson-magic.github.io/point2rbox-v3.github.io/'><img src='https://img.shields.io/badge/🚀_Demo-Live-orange'></a>
   <a href='./poster/iclr2026-poster-point2rbox-v3.pdf'><img src='https://img.shields.io/badge/📄_Poster-PDF-brightgreen'></a>
 </p>
