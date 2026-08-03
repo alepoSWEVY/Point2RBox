@@ -10,6 +10,8 @@
   <a href='./poster/iclr2026-poster-point2rbox-v3.pdf'><img src='https://img.shields.io/badge/📄_Poster-PDF-brightgreen'></a>
 </p>
 
+> A Jittor implementation of Point2RBox-v3 is available at [VisionXLab/Point2RBox-v3-jittor](https://github.com/VisionXLab/Point2RBox-v3-jittor).
+
 ## TODOs
 
 - [x] Release the paper on arXiv.
