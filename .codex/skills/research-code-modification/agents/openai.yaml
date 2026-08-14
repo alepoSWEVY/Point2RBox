@@ -1,0 +1,4 @@
+interface:
+  display_name: "Research Code Modification"
+  short_description: "Safely modify PyTorch and MMRotate research code"
+  default_prompt: "Use $research-code-modification to make the smallest safe change to this research code."

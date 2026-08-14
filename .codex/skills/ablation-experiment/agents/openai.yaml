@@ -1,0 +1,4 @@
+interface:
+  display_name: "Ablation Experiment"
+  short_description: "Design controlled and paper-ready ablation studies"
+  default_prompt: "Use $ablation-experiment to design a controlled ablation study for this method."

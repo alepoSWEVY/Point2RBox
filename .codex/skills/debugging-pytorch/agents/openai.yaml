@@ -1,0 +1,4 @@
+interface:
+  display_name: "PyTorch Root-Cause Debugging"
+  short_description: "Diagnose PyTorch, MMCV, and MMRotate failures"
+  default_prompt: "Use $debugging-pytorch to diagnose the root cause of this PyTorch or MMRotate failure."

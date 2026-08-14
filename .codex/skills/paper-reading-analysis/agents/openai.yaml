@@ -1,0 +1,4 @@
+interface:
+  display_name: "Paper Reading Analysis"
+  short_description: "Analyze vision papers for reproduction and research"
+  default_prompt: "Use $paper-reading-analysis to analyze this paper for reproducibility and research opportunities."

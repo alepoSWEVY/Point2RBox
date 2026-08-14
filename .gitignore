@@ -124,3 +124,8 @@ tmp
 
 # custom
 mmrotate/.mim
+/data/split_ss_dota/
+/dataset/
+/work_dirs/
+/checkpoint/
+/mobile_sam.pt

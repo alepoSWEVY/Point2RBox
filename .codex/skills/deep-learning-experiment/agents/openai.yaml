@@ -1,0 +1,4 @@
+interface:
+  display_name: "Deep Learning Experiment"
+  short_description: "Plan and record reproducible deep-learning experiments"
+  default_prompt: "Use $deep-learning-experiment to plan and verify this reproducible training experiment."
