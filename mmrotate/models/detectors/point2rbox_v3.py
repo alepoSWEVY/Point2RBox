@@ -20,6 +20,7 @@ from mmdet.utils import ConfigType, InstanceList, OptConfigType, OptMultiConfig
 from mmengine.structures import InstanceData
 from mmrotate.registry import MODELS
 from mmrotate.structures.bbox import RotatedBoxes, rbox2hbox, hbox2rbox
+from mmrotate.models.losses.utils import filter_masks
 
 from third_parties.ted.ted import TED
 
@@ -137,6 +138,7 @@ class Point2RBoxV3(SingleStageDetector):
                  label_assign_pseudo_label_switch_eopch: int = 6,
                  num_copies: int = 10,
                  debug: bool = False,
+                 sam_test_cfg: OptConfigType = None,
                  train_cfg: OptConfigType = None,
                  test_cfg: OptConfigType = None,
                  data_preprocessor: OptConfigType = None,
@@ -157,6 +159,10 @@ class Point2RBoxV3(SingleStageDetector):
         self.label_assign_pseudo_label_switch_eopch = label_assign_pseudo_label_switch_eopch
         self.num_copies = num_copies
         self.debug = debug
+        self.sam_test_cfg = sam_test_cfg or dict(enabled=False)
+        self.sam_test_stats = dict(
+            images=0, instances=0, sam_images=0, sam_instances=0,
+            watershed_images=0, watershed_instances=0)
         self.copy_paste_cache = None
 
         self.ted_model = TED()
@@ -164,6 +170,178 @@ class Point2RBoxV3(SingleStageDetector):
             param.requires_grad = False
         self.ted_model.load_state_dict(torch.load('third_parties/ted/ted.pth'))
         self.ted_model.eval()
+
+    @staticmethod
+    def _box_covariances(boxes):
+        angles = boxes[:, 4]
+        cosines, sines = torch.cos(angles), torch.sin(angles)
+        rotations = torch.stack(
+            (cosines, -sines, sines, cosines), dim=-1).reshape(-1, 2, 2)
+        half_squared = (boxes[:, 2:4] / 2).square().clamp_min(1e-6)
+        return rotations.matmul(torch.diag_embed(half_squared)).matmul(
+            rotations.transpose(1, 2))
+
+    @staticmethod
+    def _watershed_box(mask, original_box):
+        """Fit watershed geometry exactly in the predicted orientation."""
+        coordinates = torch.from_numpy(mask).to(
+            original_box.device).nonzero()[:, (1, 0)].float()
+        if len(coordinates) == 0:
+            return original_box
+        centered = coordinates - original_box[:2]
+        angle = original_box[4]
+        cosine, sine = torch.cos(angle), torch.sin(angle)
+        rotation = torch.stack((cosine, sine, -sine, cosine)).reshape(2, 2)
+        rotated = centered.matmul(rotation.T)
+        width, height = 2 * rotated.abs().amax(dim=0)
+        if width <= 0 or height <= 0:
+            return original_box
+        return torch.stack((original_box[0], original_box[1], width, height,
+                            angle))
+
+    def _sam_refine_predictions(self, image, results):
+        """Route sparse predictions to SAM and dense ones to watershed.
+
+        The detector predictions provide point prompts and class labels.  SAM
+        only changes box geometry; detector scores and labels are preserved.
+        Predictions without a valid SAM mask keep their original boxes.
+        """
+        cfg = self.sam_test_cfg
+        if not cfg.get('enabled', False) or len(results) == 0:
+            return results
+
+        sam_loss = self.bbox_head.loss_voronoi
+        required_attrs = ('candidate_pool', 'watershed_candidate_pool',
+                          '_build_predictor', '_image_to_uint8')
+        if not all(hasattr(sam_loss, name) for name in required_attrs):
+            raise TypeError(
+                'sam_test_cfg requires loss_voronoi to be '
+                'MultiRadiusPGDMLoss')
+
+        scores = results.scores
+        eligible = torch.nonzero(
+            scores >= float(cfg.get('score_thr', 0.3)),
+            as_tuple=False).flatten()
+        max_per_img = int(cfg.get('max_per_img', 100))
+        if max_per_img > 0 and len(eligible) > max_per_img:
+            order = scores[eligible].topk(max_per_img).indices
+            eligible = eligible[order]
+        if len(eligible) == 0:
+            return results
+
+        boxes = results.bboxes.tensor
+        points = boxes[eligible, :2].detach().cpu().numpy()
+        labels = results.labels[eligible].detach().cpu().numpy()
+        labels_tensor = results.labels[eligible]
+        instance_threshold = int(cfg.get('sam_instance_thr', 4))
+        use_sam = len(eligible) <= instance_threshold
+        if use_sam:
+            image_np = sam_loss._image_to_uint8(image)
+            predictor = sam_loss._build_predictor(boxes.device)
+            candidates_by_instance = sam_loss.candidate_pool.generate(
+                predictor,
+                image_np,
+                points,
+                labels,
+                sample_rules=sam_loss.sam_sample_rules)
+        else:
+            selected_boxes = boxes[eligible]
+            num_classes = self.bbox_head.num_classes
+            positive = [self.bbox_head.voronoi_thres['default'][0]] * num_classes
+            negative = [self.bbox_head.voronoi_thres['default'][1]] * num_classes
+            for classes, thresholds in self.bbox_head.voronoi_thres.get(
+                    'override', ()):
+                for class_id in classes:
+                    positive[class_id], negative[class_id] = thresholds
+            candidates_by_instance = sam_loss.watershed_candidate_pool.generate(
+                image,
+                selected_boxes[:, :2],
+                self._box_covariances(selected_boxes),
+                labels_tensor,
+                positive,
+                negative,
+                down_sample=sam_loss.down_sample,
+                default_sigma=sam_loss.default_sigma,
+                voronoi=self.bbox_head.voronoi_type)
+
+        refined = boxes.clone()
+        min_mask_area = int(cfg.get('min_mask_area', 4))
+        for local_index, candidates in enumerate(candidates_by_instance):
+            if not candidates:
+                continue
+            masks = [candidate.mask for candidate in candidates]
+            if use_sam:
+                sam_scores = np.asarray(
+                    [candidate.score for candidate in candidates])
+                best_index, _, _ = filter_masks(
+                    image,
+                    masks,
+                    sam_scores,
+                    int(labels[local_index]),
+                    image_np,
+                    points[local_index],
+                    sam_loss.mask_filter_config,
+                    self.debug)
+            else:
+                # C1 uses the original single-radius watershed, hence there
+                # is exactly one candidate and no multi-radius selection.
+                best_index = 0
+            mask = masks[best_index].astype(np.uint8)
+            if int(mask.sum()) < min_mask_area:
+                continue
+            result_index = int(eligible[local_index])
+            if use_sam:
+                contours, _ = cv2.findContours(
+                    mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                if not contours:
+                    continue
+                contour = max(contours, key=cv2.contourArea)
+                (cx, cy), (width, height), angle = cv2.minAreaRect(contour)
+                if width <= 0 or height <= 0:
+                    continue
+                refined[result_index] = boxes.new_tensor(
+                    [cx, cy, width, height, angle * math.pi / 180.0])
+            else:
+                refined[result_index] = self._watershed_box(
+                    mask.astype(bool), boxes[result_index])
+
+        stats = self.sam_test_stats
+        stats['images'] += 1
+        stats['instances'] += len(eligible)
+        branch = 'sam' if use_sam else 'watershed'
+        stats[f'{branch}_images'] += 1
+        stats[f'{branch}_instances'] += len(eligible)
+        report_interval = int(cfg.get('report_interval', 50))
+        if report_interval > 0 and stats['images'] % report_interval == 0:
+            print('[SAM_TEST_ROUTING] ' + ' '.join(
+                f'{key}={value}' for key, value in stats.items()), flush=True)
+
+        results.bboxes = RotatedBoxes(refined).regularize_boxes('le90')
+        results.bboxes = RotatedBoxes(results.bboxes)
+        return results
+
+    def predict(self,
+                batch_inputs: Tensor,
+                batch_data_samples: SampleList,
+                rescale: bool = True) -> SampleList:
+        """Predict and optionally refine box geometry with multi-scale SAM."""
+        if not self.sam_test_cfg.get('enabled', False):
+            return super().predict(batch_inputs, batch_data_samples, rescale)
+
+        x = self.extract_feat(batch_inputs)
+        results_list = self.bbox_head.predict(
+            x, batch_data_samples, rescale=False)
+        for index, (image, data_sample, results) in enumerate(zip(
+                batch_inputs, batch_data_samples, results_list)):
+            img_height, img_width = data_sample.metainfo['img_shape'][:2]
+            image = image[:, :img_height, :img_width]
+            results = self._sam_refine_predictions(image, results)
+            if rescale:
+                scale_factor = data_sample.metainfo['scale_factor']
+                results.bboxes.rescale_((1 / scale_factor[0],
+                                         1 / scale_factor[1]))
+            results_list[index] = results
+        return self.add_pred_to_datasample(batch_data_samples, results_list)
 
     def set_epoch(self, epoch):
         self.epoch = epoch
